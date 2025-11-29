@@ -1,393 +1,235 @@
+# app.py - GreenCare AI - FULLY FIXED & WORKING (Local SQLite + Local ARK)
 import streamlit as st
-import requests
-import json
-import time
+import asyncio
+import os
+from dotenv import load_dotenv
+from database import AzureDBManager  # This is SQLite under the hood
+from orchestrator import create_orchestrator
 import uuid
+from datetime import datetime  # ← THIS WAS MISSING!
 
-AGENTS = ["Health Companion", "Financial Agent", "Orchestrator"]
+load_dotenv()
 
-# ========= ARK CONFIGURATION =========
-ARK_API_KEY = ""  # Add your API key here
-ARK_API_BASE_URL = "http://localhost:3274/api/v1"  # Your local Ark API endpoint
+# ==================== CONFIGURATION ====================
+USE_LOCAL_ARK = os.getenv('USE_LOCAL_ARK', 'True').lower() == 'true'
 
-# Map UI agent names to Ark agent IDs
+ARK_API_KEY = os.getenv('ARK_API_KEY', '')
+ARK_API_BASE_URL = os.getenv('ARK_API_BASE_URL',
+    "http://localhost:3274/api/v1" if USE_LOCAL_ARK else
+    "https://openai.prod.ai-gateway.quantumblack.com/YOUR_GATEWAY_ID/v1")
+
 ARK_AGENT_IDS = {
-    "Health Companion": "health-companion-agent",
-    "Financial Agent": "financial-coach-agent",
-    "Orchestrator": "orchestrator-agent",
+    "health": "health-companion-agent",
+    "financial": "financial-coach-agent",
+    "legal": "legal-compliance-agent",
+    "critic": "language-critic-agent",
+    "orchestrator": "orchestrator-agent"
 }
 
-def call_ark_agent(agent_type: str, message: str, conversation_history: list = None):
-    """
-    Call an Ark agent via the correct API format.
-    
-    Args:
-        agent_type: The type of agent (from AGENTS list)
-        message: The user's message
-        conversation_history: Previous messages in the conversation
-    
-    Returns:
-        The agent's response text, or None if there's an error
-    """
-    if not ARK_API_KEY or ARK_API_KEY == "":
-        # If no API key, skip authentication (for local dev)
-        headers = {"Content-Type": "application/json"}
-    else:
-        headers = {
-            "Authorization": f"Bearer {ARK_API_KEY}",
-            "Content-Type": "application/json",
-        }
-    
-    agent_id = ARK_AGENT_IDS.get(agent_type)
-    if not agent_id:
-        return None
-    
-    try:
-        # Generate a unique query ID
-        query_id = f"chat-query-{str(uuid.uuid4())}"
-        
-        # Generate or use existing session ID
-        if "session_id" not in st.session_state:
-            st.session_state.session_id = f"session-{int(time.time() * 1000)}"
-        
-        # Prepare the input messages in Ark format
-        input_messages = []
-        
-        # Add conversation history if available
-        if conversation_history:
-            input_messages.extend(conversation_history)
-        
-        # Add the current message
-        input_messages.append({"role": "user", "content": message})
-        
-        # Create the Ark query payload
-        payload = {
-            "name": query_id,
-            "namespace": "default",
-            "type": "messages",
-            "input": input_messages,
-            "sessionId": st.session_state.session_id,
-            "targets": [
-                {
-                    "name": agent_id,
-                    "type": "agent"
-                }
-            ],
-            "timeout": "5m0s"
-        }
-        
-        # Create the query
-        response = requests.post(
-            f"{ARK_API_BASE_URL}/queries",
-            headers=headers,
-            json=payload,
-            timeout=60
-        )
-        
-        if response.status_code in [200, 201]:
-            # Poll for the result
-            max_attempts = 30
-            for attempt in range(max_attempts):
-                time.sleep(1)  # Wait 1 second between polls
-                
-                result_response = requests.get(
-                    f"{ARK_API_BASE_URL}/queries/{query_id}",
-                    headers=headers,
-                    timeout=10
-                )
-                
-                if result_response.status_code == 200:
-                    data = result_response.json()
-                    
-                    # Check if the query is complete
-                    if data.get("status", {}).get("phase") == "done":
-                        # Extract the response content
-                        responses = data.get("status", {}).get("responses", [])
-                        if responses and len(responses) > 0:
-                            return responses[0].get("content", "")
-                        else:
-                            st.error("No response content from agent")
-                            return None
-                    elif data.get("status", {}).get("phase") == "failed":
-                        st.error(f"Query failed: {data.get('status', {}).get('message', 'Unknown error')}")
-                        return None
-            
-            st.error("Query timed out waiting for response")
-            return None
-        else:
-            st.error(f"Ark API error: {response.status_code} - {response.text}")
-            return None
-            
-    except Exception as e:
-        st.error(f"Error calling Ark agent: {str(e)}")
-        return None
+# ==================== SAFE SQLITE PATH (Works on OneDrive!) ====================
+if os.path.expanduser("~").endswith("OneDrive"):
+    DB_DIR = os.path.join(os.path.expanduser("~"), "AppData", "Local", "GreenCare")
+    os.makedirs(DB_DIR, exist_ok=True)
+    DB_PATH = os.path.join(DB_DIR, "greencare.db")
+else:
+    DB_PATH = os.getenv('SQLITE_DB_PATH', "greencare.db")
 
-# ========= END ARK CONFIGURATION =========
-
-
-# --- PAGE CONFIG ---
-st.set_page_config(
-    page_title="GreenCare",
-    layout="wide",
-    page_icon="💚"
+# Initialize DB & Orchestrator
+db = AzureDBManager(DB_PATH)
+orchestrator = create_orchestrator(
+    db_manager=db,
+    ark_base_url=ARK_API_BASE_URL,
+    ark_api_key=ARK_API_KEY,
+    agent_ids=ARK_AGENT_IDS
 )
 
-# --- GLOBAL CUSTOM CSS ---
-custom_css = """
-<style>
-/* Overall app background */
-.stApp {
-    background-color: #050608;
-    color: #F9FAFB;
-    font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-}
-
-/* Sidebar styling */
-[data-testid="stSidebar"] {
-    background: linear-gradient(180deg, #065f46, #022c22);
-    color: #ECFDF5;
-    border-right: 1px solid #064e3b;
-    min-width: 320px !important;
-    max-width: 320px !important;
-}
-[data-testid="stSidebar"] * {
-    color: #ECFDF5 !important;
-}
-
-/* New Chat button styling */
-.sidebar-button .stButton > button {
-    width: 100%;
-    border-radius: 999px;
-    background-color: #22c55e;
-    color: #022c22;
-    border: 1px solid #bbf7d0;
-    font-weight: 600;
-    padding: 0.6rem 1rem;
-}
-.sidebar-button .stButton > button:hover {
-    background-color: #16a34a;
-}
-
-/* Agent select label */
-.sidebar-select label {
-    font-weight: 600;
-}
-
-/* Main header area */
-.main-header {
-    padding-top: 0.75rem;
-}
-.hero-title {
-    font-size: 2.6rem;
-    font-weight: 800;
-    letter-spacing: -0.03em;
-}
-.hero-sub {
-    font-size: 1.4rem;
-    font-weight: 600;
-    color: #6ee7b7;
-    margin-bottom: 1.2rem;
-}
-
-/* Cards row */
-.card-row {
-    display: flex;
-    gap: 1rem;
-    margin-bottom: 1.8rem;
-    margin-top: 0.5rem;
-}
-.feature-card {
-    background: #0b1120;
-    border-radius: 1.25rem;
-    padding: 1.2rem 1.35rem;
-    box-shadow: 0 18px 40px rgba(0,0,0,0.55);
-    flex: 1;
-    border: 1px solid #1f2937;
-}
-.card-title {
-    font-weight: 700;
-    margin-bottom: 0.2rem;
-}
-.card-sub {
-    font-weight: 600;
-    font-size: 0.9rem;
-    color: #a7f3d0;
-    margin-bottom: 0.5rem;
-}
-.card-body {
-    font-size: 0.86rem;
-    line-height: 1.4;
-    color: #d1d5db;
-}
-
-/* Chat messages */
-[data-testid="stChatMessage"] {
-    background-color: #020617;
-    border-radius: 1rem;
-    padding: 0.75rem 1rem;
-    margin-bottom: 0.75rem;
-    border: 1px solid #111827;
-}
-[data-testid="stChatMessage"] p {
-    font-size: 0.95rem;
-}
-
-/* Chat input area */
-[data-testid="stChatInput"] {
-    background-color: #050608;
-    border-top: 1px solid #111827;
-}
-[data-testid="stChatInput"] textarea {
-    border-radius: 999px !important;
-    background-color: #020617 !important;
-    color: #F9FAFB !important;
-    border: 1px solid #1f2937 !important;
-    padding: 0.8rem 1rem !important;
-}
-[data-testid="stChatInput"] label {
-    color: #9ca3af !important;
-}
-
-/* Hide Streamlit branding footer */
-footer, #MainMenu {
-    visibility: hidden;
-}
-</style>
-"""
-
-st.markdown(custom_css, unsafe_allow_html=True)
-
-# --- SESSION STATE SETUP ---
-if "conversations" not in st.session_state:
-    st.session_state.conversations = {agent: [] for agent in AGENTS}
-
-if "current_agent" not in st.session_state:
-    st.session_state.current_agent = AGENTS[0]
-
-# --- SIDEBAR ---
-with st.sidebar:
-    st.markdown("### 💚 AI Health Companion")
-
-    # New chat button
-    st.markdown('<div class="sidebar-button">', unsafe_allow_html=True)
-    if st.button("✨ New chat"):
-        st.session_state.conversations[st.session_state.current_agent] = []
-        # Reset session ID for new chat
-        if "session_id" in st.session_state:
-            del st.session_state.session_id
-    st.markdown('</div>', unsafe_allow_html=True)
-
-    st.markdown("---")
-
-    # Agent selector
-    st.markdown('<div class="sidebar-select">', unsafe_allow_html=True)
-    agent_choice = st.selectbox(
-        "Select an Agent:",
-        AGENTS,
-        index=AGENTS.index(st.session_state.current_agent)
-    )
-    st.markdown('</div>', unsafe_allow_html=True)
-
-    # Update current agent
-    st.session_state.current_agent = agent_choice
-
-    st.markdown("---")
-    st.caption("Tip: switch agents to change how the assistant responds.")
-
-    # Recent chats summary
-    st.markdown("#### Recent chats")
-    for agent in AGENTS:
-        conv = st.session_state.conversations.get(agent, [])
-        user_msgs = [m["content"] for m in conv if m["role"] == "user"]
-        if not user_msgs:
-            continue
-        st.markdown(f"**{agent}**")
-        for text in user_msgs[-3:]:
-            st.caption(f"• {text[:50]}...")
-
-# --- MAIN CONTENT HEADER ---
-st.markdown(
-    """
-    <div class="main-header">
-        <div class="hero-title">AI health chat</div>
-        <div class="hero-sub">for patients, professionals, and their finances.</div>
-        <div class="card-row">
-            <div class="feature-card">
-                <div class="card-title">Health Companion</div>
-                <div class="card-sub">Daily wellbeing support.</div>
-                <div class="card-body">
-                    Check in on symptoms, mood, habits, and routines. 
-                    Get gentle, personalised nudges to stay on top of your health.
-                </div>
-            </div>
-            <div class="feature-card">
-                <div class="card-title">Financial Agent</div>
-                <div class="card-sub">Money and medical costs.</div>
-                <div class="card-body">
-                    Talk through treatment expenses, budgeting, and saving goals 
-                    while keeping your health journey sustainable.
-                </div>
-            </div>
-            <div class="feature-card">
-                <div class="card-title">Orchestrator</div>
-                <div class="card-sub">One brain for many agents.</div>
-                <div class="card-body">
-                    Coordinates different specialised agents so you get one
-                    coherent conversation instead of scattered advice.
-                </div>
-            </div>
-        </div>
+# ==================== AUTH PAGE ====================
+def show_login_page():
+    st.markdown("""
+    <div style="text-align:center;padding:3rem 0;">
+        <div style="font-size:3rem;font-weight:800;">GreenCare AI</div>
+        <div style="font-size:1.5rem;color:#6ee7b7;margin:1rem 0;">Your Personal Health & Financial Companion</div>
+        <p style="color:#9ca3af;">Private • Local • South African Law Compliant</p>
     </div>
-    """,
-    unsafe_allow_html=True
-)
+    """, unsafe_allow_html=True)
 
-current_agent = st.session_state.current_agent
+    tab1, tab2 = st.tabs(["Login", "Register"])
 
-# --- CHAT TITLE ---
-st.subheader(f"💬 Chat with your **{current_agent}**")
+    # ============== LOGIN ==============
+    with tab1:
+        with st.form("login_form"):
+            st.subheader("Welcome Back")
+            username = st.text_input("Username")
+            password = st.text_input("Password", type="password")
+            login_btn = st.form_submit_button("Login", use_container_width=True)  # ← FIXED!
 
-# --- CHAT DISPLAY ---
-messages = st.session_state.conversations[current_agent]
+            if login_btn:
+                if username and password:
+                    user_data = db.authenticate_user(username, password)
+                    if user_data:
+                        st.session_state.user = user_data
+                        st.session_state.authenticated = True
+                        session_id = f"session-{uuid.uuid4()}"
+                        db.create_session(user_data["user_id"], session_id)
+                        st.session_state.db_session_id = session_id
+                        st.success("Logged in successfully!")
+                        st.rerun()
+                    else:
+                        st.error("Invalid username or password")
+                else:
+                    st.warning("Please fill in both fields")
 
-for msg in messages:
-    st.chat_message(msg["role"]).write(msg["content"])
+    # ============== REGISTER ==============
+    with tab2:
+        with st.form("register_form"):
+            st.subheader("Create Your Account")
+            col1, col2 = st.columns(2)
+            with col1:
+                first_name = st.text_input("First Name*")
+                email = st.text_input("Email*")
+                phone = st.text_input("Phone (optional)", placeholder="+27821234567")
+                gender = st.selectbox("Gender", ["", "Male", "Female", "Other", "Prefer not to say"])
+            with col2:
+                last_name = st.text_input("Last Name*")
+                username = st.text_input("Username*")
+                dob = st.date_input("Date of Birth", value=None, min_value=datetime(1900, 1, 1))
+                province = st.selectbox("Province", [
+                    "", "Gauteng", "Western Cape", "KwaZulu-Natal", "Eastern Cape",
+                    "Free State", "Limpopo", "Mpumalanga", "North West", "Northern Cape"
+                ])
+            city = st.text_input("City/Town")
+            password = st.text_input("Password*", type="password")
+            confirm = st.text_input("Confirm Password*", type="password")
 
-# --- REPLY GENERATION ---
-def generate_reply(message: str, agent_type: str, history: list) -> str:
-    """Generate a reply using Ark agents with fallback."""
-    
-    # Try Ark agent first
-    ark_reply = call_ark_agent(agent_type, message, history)
-    if ark_reply:
-        return ark_reply
-    
-    # Fallback to local responses if Ark is unavailable
-    if agent_type == "Health Companion":
-        return "💚 I'm here to support your wellbeing. How are you feeling today?"
-    elif agent_type == "Financial Agent":
-        return "💸 Let's talk money. What's on your mind financially?"
-    elif agent_type == "Orchestrator":
-        return "🧠 I coordinate your agents. Describe what you need and I'll route it."
-    return "How can I assist you?"
+            register_btn = st.form_submit_button("Create Account", use_container_width=True)  # ← FIXED!
 
-# --- CHAT INPUT ---
-if user_input := st.chat_input("Type a message or start with how you're feeling today..."):
-    # Add user message
-    st.session_state.conversations[current_agent].append(
-        {"role": "user", "content": user_input}
-    )
-    st.chat_message("user").write(user_input)
+            if register_btn:
+                if password != confirm:
+                    st.error("Passwords do not match")
+                elif len(password) < 8:
+                    st.error("Password must be at least 8 characters")
+                elif not all([first_name, last_name, username, email]):
+                    st.error("Please fill all required fields")
+                else:
+                    user_id = db.create_user(
+                        username=username, email=email, password=password,
+                        first_name=first_name, last_name=last_name,
+                        phone=phone or None,
+                        date_of_birth=dob.isoformat() if dob else None,
+                        gender=gender if gender else None,
+                        province=province if province else None,
+                        city=city if city else None
+                    )
+                    if user_id:
+                        st.success("Account created! Please log in.")
+                        st.balloons()
+                    else:
+                        st.error("Username or email already exists")
 
-    # Generate assistant reply with conversation history
-    with st.spinner("Thinking..."):
-        reply = generate_reply(
-            user_input, 
-            current_agent, 
-            st.session_state.conversations[current_agent][:-1]
+# ==================== MAIN APP ====================
+st.set_page_config(page_title="GreenCare AI", layout="wide", page_icon="GreenCare")
+
+# Styling
+st.markdown("""
+<style>
+.stApp {background:#050608;color:#F9FAFB;}
+[data-testid="stSidebar"] {background:linear-gradient(180deg,#065f46,#022c22);color:#ECFDF5;}
+[data-testid="stSidebar"] * {color:#ECFDF5 !important;}
+.sidebar-button .stButton>button {width:100%;border-radius:999px;background:#22c55e;color:#022c22;border:none;font-weight:600;}
+.legal-notice {background:#1e293b;border-left:4px solid #f59e0b;padding:1rem;border-radius:0.5rem;margin:1.5rem 0;}
+footer,#MainMenu {visibility:hidden;}
+</style>
+""", unsafe_allow_html=True)
+
+# Session init
+if "authenticated" not in st.session_state:
+    st.session_state.authenticated = False
+if "conversation" not in st.session_state:
+    st.session_state.conversation = []
+
+if not st.session_state.authenticated:
+    show_login_page()
+else:
+    user = st.session_state.user
+
+    # Sidebar
+    with st.sidebar:
+        st.markdown(f"### {user['first_name']} {user['last_name']}")
+        st.caption(user['email'])
+        if user.get('city'): st.caption(f"{user['city']}, {user.get('province', '')}")
+
+        if st.button("Logout", use_container_width=True):
+            if "db_session_id" in st.session_state:
+                db.end_session(st.session_state.db_session_id)
+            st.session_state.clear()
+            st.rerun()
+
+        st.markdown("---")
+        if st.button("New Chat", use_container_width=True):
+            st.session_state.conversation = []
+            st.rerun()
+
+        st.markdown("---")
+        st.caption("Multi-Agent System")
+        st.caption("• Health Guidance")
+        st.caption("• Financial Coach")
+        st.caption("• Legal Compliance")
+        st.caption("• Language Critic")
+
+    # Header
+    st.markdown("""
+    <div style="text-align:center;padding:1rem 0;">
+        <div style="font-size:2.8rem;font-weight:800;">GreenCare AI</div>
+        <div style="font-size:1.4rem;color:#6ee7b7;">Your Private Health & Financial Companion</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # Legal Notice
+    st.markdown("""
+    <div class="legal-notice">
+        <strong>Legal Notice:</strong> This system is <strong>not</strong> a registered medical practitioner or financial services provider. 
+        All guidance is informational only. Always consult qualified professionals.
+    </div>
+    """, unsafe_allow_html=True)
+
+    # Load chat history
+    if not st.session_state.conversation:
+        history = db.get_chat_history(user['user_id'], agent_type="Orchestrator", limit=30)
+        st.session_state.conversation = [{"role": h["role"], "content": h["content"]} for h in history]
+
+    for msg in st.session_state.conversation:
+        st.chat_message(msg["role"]).write(msg["content"])
+
+    if prompt := st.chat_input("Ask about your health, budget, or wellness..."):
+        st.session_state.conversation.append({"role": "user", "content": prompt})
+        st.chat_message("user").write(prompt)
+
+        db.save_chat_message(
+            user_id=user['user_id'],
+            agent_type="Orchestrator",
+            role="user",
+            content=prompt,
+            session_id=st.session_state.get("db_session_id", "")
         )
-    
-    st.session_state.conversations[current_agent].append(
-        {"role": "assistant", "content": reply}
-    )
-    st.chat_message("assistant").write(reply)
+
+        with st.spinner("All agents are thinking..."):
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                result = loop.run_until_complete(orchestrator.process_user_request(
+                    user_id=user['user_id'],
+                    user_prompt=prompt,
+                    session_id=st.session_state.get("db_session_id", "")
+                ))
+            finally:
+                loop.close()
+
+            reply = result.get("content", "Sorry, I couldn't process that.")
+            if result["status"] == "blocked":
+                reply = result["message"]
+                st.warning(reply)
+            elif result["status"] == "error":
+                st.error(reply)
+
+            st.session_state.conversation.append({"role": "assistant", "content": reply})
+            st.chat_message("assistant").write(reply)

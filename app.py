@@ -1,53 +1,128 @@
 import streamlit as st
+import requests
+import json
+import time
+import uuid
 
 AGENTS = ["Health Companion", "Financial Agent", "Orchestrator"]
 
-# ========= ARK PLACEHOLDERS =========
-# Try to import Ark client. If it's not installed yet,
-# ark_client will be None and the app will still work.
-try:
-    from ark import ArkClient  # type: ignore
-    ark_client = ArkClient()
-except ImportError:
-    ark_client = None
+# ========= ARK CONFIGURATION =========
+ARK_API_KEY = ""  # Add your API key here
+ARK_API_BASE_URL = "http://localhost:3274/api/v1"  # Your local Ark API endpoint
 
-# Map the UI agent names to your Ark agent IDs / names.
-# TODO: replace these strings with the actual Ark agent identifiers.
+# Map UI agent names to Ark agent IDs
 ARK_AGENT_IDS = {
-    "Health Companion": "health_companion_agent",
-    "Financial Agent": "financial_agent",
-    "Orchestrator": "orchestrator_agent",
+    "Health Companion": "health-companion-agent",
+    "Financial Agent": "financial-coach-agent",
+    "Orchestrator": "orchestrator-agent",
 }
 
-def call_ark_agent(agent_type: str, message: str):
+def call_ark_agent(agent_type: str, message: str, conversation_history: list = None):
     """
-    Placeholder for calling an Ark agent.
-
-    Replace the commented example with the real Ark Python API
-    once you know the method signatures.
+    Call an Ark agent via the correct API format.
+    
+    Args:
+        agent_type: The type of agent (from AGENTS list)
+        message: The user's message
+        conversation_history: Previous messages in the conversation
+    
+    Returns:
+        The agent's response text, or None if there's an error
     """
-    if ark_client is None:
-        # Ark not available yet – return None so we fall back to local reply.
-        return None
-
+    if not ARK_API_KEY or ARK_API_KEY == "":
+        # If no API key, skip authentication (for local dev)
+        headers = {"Content-Type": "application/json"}
+    else:
+        headers = {
+            "Authorization": f"Bearer {ARK_API_KEY}",
+            "Content-Type": "application/json",
+        }
+    
     agent_id = ARK_AGENT_IDS.get(agent_type)
     if not agent_id:
         return None
+    
+    try:
+        # Generate a unique query ID
+        query_id = f"chat-query-{str(uuid.uuid4())}"
+        
+        # Generate or use existing session ID
+        if "session_id" not in st.session_state:
+            st.session_state.session_id = f"session-{int(time.time() * 1000)}"
+        
+        # Prepare the input messages in Ark format
+        input_messages = []
+        
+        # Add conversation history if available
+        if conversation_history:
+            input_messages.extend(conversation_history)
+        
+        # Add the current message
+        input_messages.append({"role": "user", "content": message})
+        
+        # Create the Ark query payload
+        payload = {
+            "name": query_id,
+            "namespace": "default",
+            "type": "messages",
+            "input": input_messages,
+            "sessionId": st.session_state.session_id,
+            "targets": [
+                {
+                    "name": agent_id,
+                    "type": "agent"
+                }
+            ],
+            "timeout": "5m0s"
+        }
+        
+        # Create the query
+        response = requests.post(
+            f"{ARK_API_BASE_URL}/queries",
+            headers=headers,
+            json=payload,
+            timeout=60
+        )
+        
+        if response.status_code in [200, 201]:
+            # Poll for the result
+            max_attempts = 30
+            for attempt in range(max_attempts):
+                time.sleep(1)  # Wait 1 second between polls
+                
+                result_response = requests.get(
+                    f"{ARK_API_BASE_URL}/queries/{query_id}",
+                    headers=headers,
+                    timeout=10
+                )
+                
+                if result_response.status_code == 200:
+                    data = result_response.json()
+                    
+                    # Check if the query is complete
+                    if data.get("status", {}).get("phase") == "done":
+                        # Extract the response content
+                        responses = data.get("status", {}).get("responses", [])
+                        if responses and len(responses) > 0:
+                            return responses[0].get("content", "")
+                        else:
+                            st.error("No response content from agent")
+                            return None
+                    elif data.get("status", {}).get("phase") == "failed":
+                        st.error(f"Query failed: {data.get('status', {}).get('message', 'Unknown error')}")
+                        return None
+            
+            st.error("Query timed out waiting for response")
+            return None
+        else:
+            st.error(f"Ark API error: {response.status_code} - {response.text}")
+            return None
+            
+    except Exception as e:
+        st.error(f"Error calling Ark agent: {str(e)}")
+        return None
 
-    # ---------- EXAMPLE (PSEUDOCODE) ----------
-    # This is just a sketch. Adjust to the real Ark SDK.
-    #
-    # response = ark_client.chat(
-    #     agent_id=agent_id,
-    #     messages=[{"role": "user", "content": message}]
-    # )
-    # return response["content"]
-    # -----------------------------------------
-
-    # For now, just return a visible placeholder so you can see
-    # where Ark will plug in.
-    return f"[ARK placeholder] ({agent_type}) would respond to: “{message}”"
-# ========= END ARK PLACEHOLDERS =========
+# ========= END ARK CONFIGURATION =========
 
 
 # --- PAGE CONFIG ---
@@ -57,7 +132,7 @@ st.set_page_config(
     page_icon="💚"
 )
 
-# --- GLOBAL CUSTOM CSS (green sidebar + dark main, cards, chat input) ---
+# --- GLOBAL CUSTOM CSS ---
 custom_css = """
 <style>
 /* Overall app background */
@@ -114,7 +189,7 @@ custom_css = """
     margin-bottom: 1.2rem;
 }
 
-/* Cards row like RoboClinic */
+/* Cards row */
 .card-row {
     display: flex;
     gap: 1rem;
@@ -193,10 +268,13 @@ if "current_agent" not in st.session_state:
 with st.sidebar:
     st.markdown("### 💚 AI Health Companion")
 
-    # New chat button (reset only current agent's conversation)
+    # New chat button
     st.markdown('<div class="sidebar-button">', unsafe_allow_html=True)
     if st.button("✨ New chat"):
         st.session_state.conversations[st.session_state.current_agent] = []
+        # Reset session ID for new chat
+        if "session_id" in st.session_state:
+            del st.session_state.session_id
     st.markdown('</div>', unsafe_allow_html=True)
 
     st.markdown("---")
@@ -225,9 +303,9 @@ with st.sidebar:
             continue
         st.markdown(f"**{agent}**")
         for text in user_msgs[-3:]:
-            st.caption(f"• {text}")
+            st.caption(f"• {text[:50]}...")
 
-# --- MAIN CONTENT HEADER (hero + cards) ---
+# --- MAIN CONTENT HEADER ---
 st.markdown(
     """
     <div class="main-header">
@@ -269,38 +347,46 @@ current_agent = st.session_state.current_agent
 # --- CHAT TITLE ---
 st.subheader(f"💬 Chat with your **{current_agent}**")
 
-# --- CHAT DISPLAY (ONLY CURRENT AGENT) ---
+# --- CHAT DISPLAY ---
 messages = st.session_state.conversations[current_agent]
 
 for msg in messages:
     st.chat_message(msg["role"]).write(msg["content"])
 
-# --- REPLY GENERATION (Ark first, then fallback) ---
-def generate_reply(message: str, agent_type: str) -> str:
-    # 1) Try Ark (placeholder)
-    ark_reply = call_ark_agent(agent_type, message)
-    if isinstance(ark_reply, str) and ark_reply.strip():
+# --- REPLY GENERATION ---
+def generate_reply(message: str, agent_type: str, history: list) -> str:
+    """Generate a reply using Ark agents with fallback."""
+    
+    # Try Ark agent first
+    ark_reply = call_ark_agent(agent_type, message, history)
+    if ark_reply:
         return ark_reply
-
-    # 2) Fallback local behaviour (what you had before)
+    
+    # Fallback to local responses if Ark is unavailable
     if agent_type == "Health Companion":
-        return "💚 I’m here to support your wellbeing. How are you feeling today?"
+        return "💚 I'm here to support your wellbeing. How are you feeling today?"
     elif agent_type == "Financial Agent":
-        return "💸 Let's talk money. What’s on your mind financially?"
+        return "💸 Let's talk money. What's on your mind financially?"
     elif agent_type == "Orchestrator":
-        return "🧠 I coordinate your agents. Describe what you need and I’ll route it."
+        return "🧠 I coordinate your agents. Describe what you need and I'll route it."
     return "How can I assist you?"
 
 # --- CHAT INPUT ---
 if user_input := st.chat_input("Type a message or start with how you're feeling today..."):
-    # Add user message to current agent's conversation
+    # Add user message
     st.session_state.conversations[current_agent].append(
         {"role": "user", "content": user_input}
     )
     st.chat_message("user").write(user_input)
 
-    # Generate assistant reply
-    reply = generate_reply(user_input, current_agent)
+    # Generate assistant reply with conversation history
+    with st.spinner("Thinking..."):
+        reply = generate_reply(
+            user_input, 
+            current_agent, 
+            st.session_state.conversations[current_agent][:-1]
+        )
+    
     st.session_state.conversations[current_agent].append(
         {"role": "assistant", "content": reply}
     )

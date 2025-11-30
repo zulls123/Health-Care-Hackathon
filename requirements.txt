@@ -1,0 +1,38 @@
+# GreenCare AI - Python Dependencies
+
+# Core Framework
+streamlit>=1.28.0
+
+# Environment Management
+python-dotenv>=1.0.0
+
+# HTTP Requests
+requests>=2.31.0
+
+# Database (included with Python, but listed for clarity)
+# sqlite3 - comes bundled with Python
+
+# Security & Hashing (included with Python)
+# hashlib - comes bundled with Python
+# secrets - comes bundled with Python
+
+# Date/Time handling (included with Python)
+# datetime - comes bundled with Python
+
+# Type hints (included with Python 3.8+)
+# typing - comes bundled with Python
+
+# Context managers (included with Python)
+# contextlib - comes bundled with Python
+
+# JSON handling (included with Python)
+# json - comes bundled with Python
+
+# File system operations (included with Python)
+# os - comes bundled with Python
+
+# UUID generation (included with Python)
+# uuid - comes bundled with Python
+
+# Time utilities (included with Python)
+# time - comes bundled with Python

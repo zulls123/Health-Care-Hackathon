@@ -1,4 +1,4 @@
-# database.py - SQLite Database Manager
+# database.py - FULL VERSION WITH ALL UPDATE METHODS
 import sqlite3
 import json
 from datetime import datetime, timedelta
@@ -10,27 +10,19 @@ from contextlib import contextmanager
 
 class SQLiteDBManager:
     def __init__(self, db_path: str = "greencare.db"):
-        """
-        Initialize SQLite database connection
-        
-        Args:
-            db_path: Path to SQLite database file (default: greencare.db)
-        """
         self.db_path = db_path
         self.initialize_database()
     
     @contextmanager
     def get_connection(self):
-        """Context manager for database connections"""
         conn = sqlite3.connect(self.db_path)
-        conn.row_factory = sqlite3.Row  # Enable column access by name
+        conn.row_factory = sqlite3.Row
         try:
             yield conn
         finally:
             conn.close()
     
     def initialize_database(self):
-        """Create all necessary tables if they don't exist"""
         with self.get_connection() as conn:
             cursor = conn.cursor()
             
@@ -71,7 +63,7 @@ class SQLiteDBManager:
             CREATE TABLE IF NOT EXISTS MedicalAid (
                 medical_aid_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER NOT NULL,
-                scheme_name TEXT NOT NULL,
+                scheme_name TEXT,
                 plan_type TEXT,
                 membership_number TEXT,
                 is_active INTEGER DEFAULT 1,
@@ -123,7 +115,7 @@ class SQLiteDBManager:
             CREATE TABLE IF NOT EXISTS FinancialAccounts (
                 account_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER NOT NULL,
-                account_type TEXT NOT NULL,
+                account_type TEXT NOT NULL DEFAULT 'main',
                 balance REAL DEFAULT 0,
                 currency TEXT DEFAULT 'ZAR',
                 monthly_income REAL,
@@ -160,7 +152,7 @@ class SQLiteDBManager:
             )
             """)
             
-            # Create indexes for better performance
+            # Indexes
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_login_username ON Login(username)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_login_user_id ON Login(user_id)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_medical_aid_user_id ON MedicalAid(user_id)")
@@ -173,9 +165,9 @@ class SQLiteDBManager:
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_user_sessions_user_id ON UserSessions(user_id)")
             
             conn.commit()
-    
+
     # ========= USER MANAGEMENT =========
-    
+
     def create_user(self, username: str, email: str, password: str, 
                    first_name: str, last_name: str, 
                    phone: str = None, date_of_birth: str = None,
@@ -223,7 +215,6 @@ class SQLiteDBManager:
             cursor = conn.cursor()
             
             try:
-                # Get user and login info
                 cursor.execute("""
                     SELECT 
                         u.user_id, u.first_name, u.last_name, u.email, 
@@ -233,68 +224,55 @@ class SQLiteDBManager:
                     INNER JOIN Login l ON u.user_id = l.user_id
                     WHERE l.username = ? AND l.is_active = 1
                 """, (username,))
-                
                 row = cursor.fetchone()
                 
                 if not row:
                     return None
                 
                 # Verify password
-                stored_hash = row[9]
-                salt = row[10]
-                calculated_hash = hashlib.pbkdf2_hmac('sha256', 
-                                                     password.encode(), 
-                                                     salt.encode(), 
-                                                     100000).hex()
+                password_hash = hashlib.pbkdf2_hmac('sha256', 
+                                                   password.encode(), 
+                                                   row["password_salt"].encode(), 
+                                                   100000).hex()
                 
-                if calculated_hash != stored_hash:
+                if password_hash != row["password_hash"]:
                     return None
                 
                 # Update last login
-                user_id = row[0]
                 cursor.execute("""
-                    UPDATE Users SET last_login = CURRENT_TIMESTAMP
+                    UPDATE Login
+                    SET last_login_at = CURRENT_TIMESTAMP
                     WHERE user_id = ?
-                """, (user_id,))
+                """, (row["user_id"],))
+                
                 cursor.execute("""
-                    UPDATE Login SET last_login_at = CURRENT_TIMESTAMP
+                    UPDATE Users
+                    SET last_login = CURRENT_TIMESTAMP
                     WHERE user_id = ?
-                """, (user_id,))
+                """, (row["user_id"],))
+                
                 conn.commit()
                 
-                user_data = {
-                    "user_id": row[0],
-                    "first_name": row[1],
-                    "last_name": row[2],
-                    "email": row[3],
-                    "phone": row[4],
-                    "date_of_birth": row[5],
-                    "gender": row[6],
-                    "province": row[7],
-                    "city": row[8],
-                    "username": username
+                return {
+                    "user_id": row["user_id"],
+                    "first_name": row["first_name"],
+                    "last_name": row["last_name"],
+                    "email": row["email"],
+                    "phone": row["phone"],
+                    "date_of_birth": row["date_of_birth"],
+                    "gender": row["gender"],
+                    "province": row["province"],
+                    "city": row["city"]
                 }
                 
-                return user_data
-                
             except Exception as e:
-                print(f"Authentication error: {e}")
+                print(f"Error authenticating user: {e}")
                 return None
     
-    # ========= USER PROFILE =========
-    
     def get_user_profile(self, user_id: int) -> Dict:
-        """Retrieve complete user profile including health and financial data"""
+        """Get complete user profile"""
         with self.get_connection() as conn:
             cursor = conn.cursor()
-            
-            profile = {
-                "medical_aid": None,
-                "medical_history": [],
-                "medications": [],
-                "allergies": [],
-                "financial_accounts": []
-            }
             
             try:
                 # Get medical aid
@@ -303,46 +281,28 @@ class SQLiteDBManager:
                     FROM MedicalAid
                     WHERE user_id = ? AND is_active = 1
                 """, (user_id,))
-                
-                row = cursor.fetchone()
-                if row:
-                    profile["medical_aid"] = {
-                        "scheme_name": row[0],
-                        "plan_type": row[1],
-                        "membership_number": row[2]
-                    }
+                ma = cursor.fetchone()
+                medical_aid = {
+                    "scheme_name": ma["scheme_name"],
+                    "plan_type": ma["plan_type"],
+                    "membership_number": ma["membership_number"]
+                } if ma else None
                 
                 # Get medical history
                 cursor.execute("""
-                    SELECT condition_name, diagnosis_date, status, notes
+                    SELECT condition_name as condition, status
                     FROM MedicalHistory
                     WHERE user_id = ?
-                    ORDER BY diagnosis_date DESC
                 """, (user_id,))
-                
-                for row in cursor.fetchall():
-                    profile["medical_history"].append({
-                        "condition": row[0],
-                        "diagnosis_date": row[1],
-                        "status": row[2],
-                        "notes": row[3]
-                    })
+                medical_history = [dict(r) for r in cursor.fetchall()]
                 
                 # Get medications
                 cursor.execute("""
-                    SELECT medication_name, dosage, frequency, start_date
+                    SELECT medication_name as name, dosage, frequency, is_active
                     FROM Medication
-                    WHERE user_id = ? AND is_active = 1
-                    ORDER BY start_date DESC
+                    WHERE user_id = ?
                 """, (user_id,))
-                
-                for row in cursor.fetchall():
-                    profile["medications"].append({
-                        "name": row[0],
-                        "dosage": row[1],
-                        "frequency": row[2],
-                        "start_date": row[3]
-                    })
+                medications = [dict(r) for r in cursor.fetchall()]
                 
                 # Get allergies
                 cursor.execute("""
@@ -350,13 +310,7 @@ class SQLiteDBManager:
                     FROM Allergies
                     WHERE user_id = ?
                 """, (user_id,))
-                
-                for row in cursor.fetchall():
-                    profile["allergies"].append({
-                        "allergen": row[0],
-                        "severity": row[1],
-                        "reaction": row[2]
-                    })
+                allergies = [dict(r) for r in cursor.fetchall()]
                 
                 # Get financial accounts
                 cursor.execute("""
@@ -364,164 +318,110 @@ class SQLiteDBManager:
                     FROM FinancialAccounts
                     WHERE user_id = ?
                 """, (user_id,))
+                financial_accounts = [dict(r) for r in cursor.fetchall()]
                 
-                for row in cursor.fetchall():
-                    profile["financial_accounts"].append({
-                        "account_type": row[0],
-                        "balance": float(row[1]) if row[1] else 0,
-                        "currency": row[2],
-                        "monthly_income": float(row[3]) if row[3] else None,
-                        "monthly_budget": float(row[4]) if row[4] else None
-                    })
-                
-                return profile
+                return {
+                    "medical_aid": medical_aid,
+                    "medical_history": medical_history,
+                    "medications": medications,
+                    "allergies": allergies,
+                    "financial_accounts": financial_accounts
+                }
                 
             except Exception as e:
-                print(f"Error fetching profile: {e}")
-                return profile
-    
-    # ========= MEDICAL AID =========
-    
-    def update_medical_aid(self, user_id: int, scheme_name: str, 
-                          plan_type: str = None, membership_number: str = None):
-        """Update or create medical aid information"""
+                print(f"Error getting profile: {e}")
+                return {}
+
+    # ========= PROFILE UPDATE METHODS =========
+
+    def update_medical_aid(self, user_id: int, scheme_name: str, membership_number: str):
+        """Update or create medical aid entry"""
         with self.get_connection() as conn:
             cursor = conn.cursor()
-            
             try:
-                # Check if exists
-                cursor.execute("SELECT medical_aid_id FROM MedicalAid WHERE user_id = ?", 
-                              (user_id,))
+                cursor.execute("""
+                    SELECT medical_aid_id FROM MedicalAid WHERE user_id = ?
+                """, (user_id,))
                 exists = cursor.fetchone()
                 
                 if exists:
                     cursor.execute("""
                         UPDATE MedicalAid
-                        SET scheme_name = ?, plan_type = ?, membership_number = ?
+                        SET scheme_name = ?, membership_number = ?, is_active = 1
                         WHERE user_id = ?
-                    """, (scheme_name, plan_type, membership_number, user_id))
+                    """, (scheme_name, membership_number, user_id))
                 else:
                     cursor.execute("""
-                        INSERT INTO MedicalAid (user_id, scheme_name, plan_type, membership_number)
-                        VALUES (?, ?, ?, ?)
-                    """, (user_id, scheme_name, plan_type, membership_number))
+                        INSERT INTO MedicalAid (user_id, scheme_name, membership_number)
+                        VALUES (?, ?, ?)
+                    """, (user_id, scheme_name, membership_number))
                 
                 conn.commit()
             except Exception as e:
                 print(f"Error updating medical aid: {e}")
                 conn.rollback()
     
-    # ========= MEDICAL HISTORY =========
-    
-    def add_medical_condition(self, user_id: int, condition_name: str, 
-                             diagnosis_date: str = None, status: str = "Active", 
-                             notes: str = None):
-        """Add a medical condition to history"""
+    def update_medical_history(self, user_id: int, conditions: List[str]):
+        """Update medical history - delete old and add new"""
         with self.get_connection() as conn:
             cursor = conn.cursor()
-            
             try:
-                cursor.execute("""
-                    INSERT INTO MedicalHistory (user_id, condition_name, diagnosis_date, status, notes)
-                    VALUES (?, ?, ?, ?, ?)
-                """, (user_id, condition_name, diagnosis_date, status, notes))
-                
+                cursor.execute("DELETE FROM MedicalHistory WHERE user_id = ?", (user_id,))
+                for cond in conditions:
+                    cursor.execute("""
+                        INSERT INTO MedicalHistory (user_id, condition_name, status)
+                        VALUES (?, ?, 'Active')
+                    """, (user_id, cond))
                 conn.commit()
             except Exception as e:
-                print(f"Error adding medical condition: {e}")
+                print(f"Error updating medical history: {e}")
                 conn.rollback()
-    
-    # ========= MEDICATIONS =========
-    
-    def add_medication(self, user_id: int, medication_name: str, 
-                      dosage: str = None, frequency: str = None, 
-                      start_date: str = None):
-        """Add a medication"""
+
+    def update_medications(self, user_id: int, medications: List[str]):
+        """Update medications - delete old and add new"""
         with self.get_connection() as conn:
             cursor = conn.cursor()
-            
             try:
-                cursor.execute("""
-                    INSERT INTO Medication (user_id, medication_name, dosage, frequency, start_date)
-                    VALUES (?, ?, ?, ?, ?)
-                """, (user_id, medication_name, dosage, frequency, start_date))
-                
+                cursor.execute("DELETE FROM Medication WHERE user_id = ?", (user_id,))
+                for med in medications:
+                    cursor.execute("""
+                        INSERT INTO Medication (user_id, medication_name, is_active)
+                        VALUES (?, ?, 1)
+                    """, (user_id, med))
                 conn.commit()
             except Exception as e:
-                print(f"Error adding medication: {e}")
+                print(f"Error updating medications: {e}")
                 conn.rollback()
     
-    def deactivate_medication(self, user_id: int, medication_name: str):
-        """Mark a medication as inactive"""
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            
-            try:
-                cursor.execute("""
-                    UPDATE Medication
-                    SET is_active = 0
-                    WHERE user_id = ? AND medication_name = ?
-                """, (user_id, medication_name))
-                
-                conn.commit()
-            except Exception as e:
-                print(f"Error deactivating medication: {e}")
-                conn.rollback()
-    
-    # ========= ALLERGIES =========
-    
-    def add_allergy(self, user_id: int, allergen: str, 
-                   severity: str = None, reaction: str = None):
-        """Add an allergy"""
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            
-            try:
-                cursor.execute("""
-                    INSERT INTO Allergies (user_id, allergen, severity, reaction)
-                    VALUES (?, ?, ?, ?)
-                """, (user_id, allergen, severity, reaction))
-                
-                conn.commit()
-            except Exception as e:
-                print(f"Error adding allergy: {e}")
-                conn.rollback()
-    
-    # ========= FINANCIAL ACCOUNTS =========
-    
-    def update_financial_account(self, user_id: int, account_type: str = "Primary",
-                                balance: float = 0, monthly_income: float = None,
-                                monthly_budget: float = None, currency: str = "ZAR"):
+    def update_financial_account(self, user_id: int, monthly_income: float, monthly_budget: float):
         """Update or create financial account"""
         with self.get_connection() as conn:
             cursor = conn.cursor()
-            
             try:
                 cursor.execute("""
                     SELECT account_id FROM FinancialAccounts 
-                    WHERE user_id = ? AND account_type = ?
-                """, (user_id, account_type))
+                    WHERE user_id = ? AND account_type = 'main'
+                """, (user_id,))
                 exists = cursor.fetchone()
                 
                 if exists:
                     cursor.execute("""
                         UPDATE FinancialAccounts
-                        SET balance = ?, monthly_income = ?, monthly_budget = ?, 
-                            currency = ?, updated_at = CURRENT_TIMESTAMP
-                        WHERE user_id = ? AND account_type = ?
-                    """, (balance, monthly_income, monthly_budget, currency, user_id, account_type))
+                        SET monthly_income = ?, monthly_budget = ?, updated_at = CURRENT_TIMESTAMP
+                        WHERE user_id = ? AND account_type = 'main'
+                    """, (monthly_income, monthly_budget, user_id))
                 else:
                     cursor.execute("""
                         INSERT INTO FinancialAccounts 
-                        (user_id, account_type, balance, monthly_income, monthly_budget, currency)
-                        VALUES (?, ?, ?, ?, ?, ?)
-                    """, (user_id, account_type, balance, monthly_income, monthly_budget, currency))
+                        (user_id, account_type, monthly_income, monthly_budget)
+                        VALUES (?, 'main', ?, ?)
+                    """, (user_id, monthly_income, monthly_budget))
                 
                 conn.commit()
             except Exception as e:
                 print(f"Error updating financial account: {e}")
                 conn.rollback()
-    
+
     # ========= CHAT HISTORY =========
     
     def save_chat_message(self, user_id: int, agent_type: str, role: str, 
@@ -577,7 +477,7 @@ class SQLiteDBManager:
                         "session_id": row[4]
                     })
                 
-                return list(reversed(history))  # Return in chronological order
+                return list(reversed(history))  # Chronological
                 
             except Exception as e:
                 print(f"Error fetching chat history: {e}")
@@ -726,7 +626,6 @@ class SQLiteDBManager:
             context_parts.append(recent)
         
         return "\n".join(context_parts)
-
 
 # Alias for backward compatibility
 AzureDBManager = SQLiteDBManager
